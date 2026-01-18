@@ -208,8 +208,23 @@ function kube::codegen::gen_helpers() {
             | xargs -0 rm -f
 
         local readonly_args=()
+        local -A seen_readonly=()
         for pkg in "${KUBE_CODEGEN_READONLY_PKGS[@]}"; do
-            readonly_args+=("--readonly-pkg" "${pkg}")
+            if [[ -z "${seen_readonly["${pkg}"]:-}" ]]; then
+                readonly_args+=("--readonly-pkg" "${pkg}")
+                seen_readonly["${pkg}"]=1
+            fi
+        done
+        for pkg in "${input_pkgs[@]}"; do
+            if [[ -z "${seen_readonly["${pkg}"]:-}" ]]; then
+                local pkg_dir
+                if pkg_dir=$(go list -find -f '{{.Dir}}' "${pkg}" 2>/dev/null); then
+                    if [ ! -w "${pkg_dir}" ]; then
+                        readonly_args+=("--readonly-pkg" "${pkg}")
+                        seen_readonly["${pkg}"]=1
+                    fi
+                fi
+            fi
         done
         "${GOBIN}/validation-gen" \
             -v "${v}" \
@@ -432,15 +447,39 @@ function kube::codegen::gen_openapi() {
             -name zz_generated.openapi.go \
             | xargs -0 rm -f
 
-        local readonly_args=()
-        for pkg in "${KUBE_CODEGEN_READONLY_PKGS[@]}"; do
-            readonly_args+=("--readonly-pkg" "${pkg}")
-        done
+        local openapi_inputs=("${input_pkgs[@]}")
         # These apimachinery packages are passed as explicit inputs
         # because they contain types referenced by most API types
         # (e.g. ObjectMeta, Quantity). openapi-gen needs them for
         # type resolution even though they are not in the caller's
         # input directory.
+        openapi_inputs+=(
+            "k8s.io/apimachinery/pkg/apis/meta/v1"
+            "k8s.io/apimachinery/pkg/runtime"
+            "k8s.io/apimachinery/pkg/version"
+            "k8s.io/apimachinery/pkg/api/resource"
+        )
+
+        local readonly_args=()
+        local -A seen_readonly=()
+        for pkg in "${KUBE_CODEGEN_READONLY_PKGS[@]}"; do
+            if [[ -z "${seen_readonly["${pkg}"]:-}" ]]; then
+                readonly_args+=("--readonly-pkg" "${pkg}")
+                seen_readonly["${pkg}"]=1
+            fi
+        done
+        for pkg in "${openapi_inputs[@]}"; do
+            if [[ -z "${seen_readonly["${pkg}"]:-}" ]]; then
+                local pkg_dir
+                if pkg_dir=$(go list -find -f '{{.Dir}}' "${pkg}" 2>/dev/null); then
+                    if [ ! -w "${pkg_dir}" ]; then
+                        readonly_args+=("--readonly-pkg" "${pkg}")
+                        seen_readonly["${pkg}"]=1
+                    fi
+                fi
+            fi
+        done
+
         "${GOBIN}/openapi-gen" \
             -v "${v}" \
             --output-file zz_generated.openapi.go \
@@ -450,11 +489,7 @@ function kube::codegen::gen_openapi() {
             --report-filename "${new_report}" \
             --output-model-name-file="${output_model_name_file}" \
             "${readonly_args[@]}" \
-            "k8s.io/apimachinery/pkg/apis/meta/v1" \
-            "k8s.io/apimachinery/pkg/runtime" \
-            "k8s.io/apimachinery/pkg/version" \
-            "k8s.io/apimachinery/pkg/api/resource" \
-            "${input_pkgs[@]}"
+            "${openapi_inputs[@]}"
     fi
 
     if [ ! -e "${report}" ]; then
